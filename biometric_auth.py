@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import base64
+import time   
 from PyQt5.QtWidgets import QMessageBox
 from facenet_pytorch import MTCNN, InceptionResnetV1
 
@@ -15,7 +16,38 @@ class BiometricAuthenticator:
         self.embedder = InceptionResnetV1(pretrained="vggface2").eval()
 
     # ------------------------------------------------------
-    # Utility: Capture a face image from webcam
+    # Simple motion-based liveness detection
+    # ------------------------------------------------------
+    def _check_liveness_motion(self, seconds=2, threshold=300000):   # ✅ ADDED
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            return False
+
+        t_end = time.time() + seconds
+
+        ret, prev = cap.read()
+        if not ret:
+            cap.release()
+            return False
+
+        prev_gray = cv2.cvtColor(prev, cv2.COLOR_BGR2GRAY)
+        motion_score = 0
+
+        while time.time() < t_end:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            diff = cv2.absdiff(prev_gray, gray)
+            motion_score += diff.sum()
+            prev_gray = gray
+
+        cap.release()
+        return motion_score > threshold
+
+    # ------------------------------------------------------
+    # Capture a face image
     # ------------------------------------------------------
     def _capture_image(self):
         cap = cv2.VideoCapture(0)
@@ -39,7 +71,7 @@ class BiometricAuthenticator:
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     # ------------------------------------------------------
-    # Utility: Extract Face Embedding (512-dimensional)
+    # Extract Face Embedding
     # ------------------------------------------------------
     def _get_embedding(self, img):
         try:
@@ -49,15 +81,21 @@ class BiometricAuthenticator:
                 return None
 
             embedding = self.embedder(face.unsqueeze(0))
-            return embedding.detach().numpy()[0]  # numpy array (512,)
+            return embedding.detach().numpy()[0]
         except Exception:
             QMessageBox.warning(self.parent, "Biometric", "Face processing failed.")
             return None
 
     # ------------------------------------------------------
-    # Save embedding in DB (Base64 encoded)
+    # Register face + liveness check
     # ------------------------------------------------------
     def register_face(self):
+        # ✅ LIVENESS CHECK BEFORE CAPTURE
+        QMessageBox.information(self.parent, "Liveness", "Please move your head slightly or blink.")
+        if not self._check_liveness_motion():   # 🔴 ONLY CHANGE ADDED
+            QMessageBox.warning(self.parent, "Biometric", "Liveness check failed.")
+            return False
+
         img = self._capture_image()
         if img is None:
             return False
@@ -75,13 +113,19 @@ class BiometricAuthenticator:
         return True
 
     # ------------------------------------------------------
-    # Match embedding against stored one
+    # Authenticate face + liveness check
     # ------------------------------------------------------
     def authenticate(self):
         stored = self.db.get_config("face_embedding")
 
         if stored is None:
             QMessageBox.warning(self.parent, "Biometric", "No biometric registered.")
+            return False
+
+        # 🔴 LIVENESS CHECK BEFORE MATCHING
+        QMessageBox.information(self.parent, "Liveness", "Please move your head or blink.")
+        if not self._check_liveness_motion():   # ONLY CHANGE ADDED
+            QMessageBox.warning(self.parent, "Biometric", "Liveness check failed.")
             return False
 
         stored_emb = np.frombuffer(base64.b64decode(stored), dtype=np.float32)
@@ -94,10 +138,9 @@ class BiometricAuthenticator:
         if current_emb is None:
             return False
 
-        # Euclidean Distance — threshold tuned for FaceNet
         distance = np.linalg.norm(stored_emb - current_emb)
 
-        if distance < 1.0:  
+        if distance < 1.0:
             QMessageBox.information(self.parent, "Biometric", "Face match successful!")
             return True
 
